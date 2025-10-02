@@ -103,3 +103,116 @@
         verified: bool,
     }
 )
+
+;; Credential marketplace listings
+(define-map credential-listings
+    {
+        credential-id: uint,
+        holder: principal,
+    }
+    {
+        verification-price: uint,
+        available: bool,
+        listed-at: uint,
+    }
+)
+
+;; Analytics and reputation tracking
+(define-map issuer-analytics
+    principal
+    {
+        monthly-credentials: uint,
+        revocation-rate: uint,
+        average-validity-period: uint,
+        last-updated: uint,
+    }
+)
+
+;; READ-ONLY FUNCTIONS - CORE DATA RETRIEVAL
+
+(define-read-only (get-credential-details (credential-id uint))
+    (map-get? credentials credential-id)
+)
+
+(define-read-only (get-issuer-info (issuer principal))
+    (map-get? authorized-issuers issuer)
+)
+
+(define-read-only (get-holder-profile (holder principal))
+    (map-get? holder-profiles holder)
+)
+
+(define-read-only (get-skill-category (category (string-utf8 32)))
+    (map-get? skill-categories category)
+)
+
+(define-read-only (get-total-credentials)
+    (var-get total-credentials)
+)
+
+(define-read-only (is-credential-valid (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) (err u0))))
+        (ok (and
+            (get verified credential)
+            (not (get revoked credential))
+            (> (get expiry-date credential) stacks-block-height)
+        ))
+    )
+)
+
+;; READ-ONLY FUNCTIONS - MARKETPLACE & ANALYTICS
+
+(define-read-only (get-verification-request (verification-id uint))
+    (map-get? verification-requests verification-id)
+)
+
+(define-read-only (get-credential-listing
+        (credential-id uint)
+        (holder principal)
+    )
+    (map-get? credential-listings {
+        credential-id: credential-id,
+        holder: holder,
+    })
+)
+
+(define-read-only (get-issuer-analytics (issuer principal))
+    (map-get? issuer-analytics issuer)
+)
+
+(define-read-only (get-holder-skill-summary (holder principal))
+    (let ((profile (unwrap! (map-get? holder-profiles holder) (err u0))))
+        (ok {
+            total-credentials: (get total-credentials profile),
+            verified-credentials: (get verified-credentials profile),
+            skill-points: (get skill-points profile),
+            verification-rate: (if (> (get total-credentials profile) u0)
+                (/ (* (get verified-credentials profile) u100)
+                    (get total-credentials profile)
+                )
+                u0
+            ),
+        })
+    )
+)
+
+(define-read-only (calculate-credential-trust-score (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) (err u0))))
+        (let (
+                (issuer-info (unwrap! (map-get? authorized-issuers (get issuer credential))
+                    (err u0)
+                ))
+                (is-valid (unwrap! (is-credential-valid credential-id) (err u0)))
+                (time-factor (if (> (get expiry-date credential) stacks-block-height)
+                    u100
+                    u0
+                ))
+            )
+            (ok (+ (* (get reputation-score issuer-info) u10)
+                (if is-valid u300 u0)
+                time-factor
+                (* (get certification-level credential) u50)
+            ))
+        )
+    )
+)
