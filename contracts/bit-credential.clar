@@ -216,3 +216,164 @@
         )
     )
 )
+
+;; PRIVATE FUNCTIONS
+
+(define-private (calculate-skill-points (level uint))
+    (if (is-eq level u1)
+        u10 ;; Basic: 10 points
+        (if (is-eq level u2)
+            u25 ;; Intermediate: 25 points
+            (if (is-eq level u3)
+                u50 ;; Advanced: 50 points
+                (if (is-eq level u4)
+                    u100 ;; Expert: 100 points
+                    u0
+                )
+            )
+        )
+    )
+)
+
+(define-private (verify-single-credential (credential-id uint))
+    (match (map-get? credentials credential-id)
+        credential (map-set credentials credential-id (merge credential { verified: true }))
+        false
+    )
+)
+
+;; PUBLIC FUNCTIONS - ISSUER MANAGEMENT
+
+(define-public (register-issuer
+        (name (string-utf8 128))
+        (issuer-type uint)
+    )
+    (begin
+        (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+        (asserts! (and (>= issuer-type u1) (<= issuer-type u3))
+            err-invalid-parameter
+        )
+        (asserts! (is-none (map-get? authorized-issuers tx-sender))
+            err-invalid-parameter
+        )
+        (map-set authorized-issuers tx-sender {
+            name: name,
+            issuer-type: issuer-type,
+            verified: false,
+            credentials-issued: u0,
+            reputation-score: u0,
+        })
+        (ok true)
+    )
+)
+
+(define-public (verify-issuer (issuer principal))
+    (let ((issuer-info (unwrap! (map-get? authorized-issuers issuer) err-not-authorized)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (asserts! (not (get verified issuer-info)) err-already-verified)
+            (map-set authorized-issuers issuer
+                (merge issuer-info { verified: true })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (add-skill-category
+        (category (string-utf8 32))
+        (description (string-utf8 128))
+    )
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (is-none (map-get? skill-categories category))
+            err-invalid-parameter
+        )
+        (map-set skill-categories category {
+            active: true,
+            total-credentials: u0,
+            category-description: description,
+        })
+        (ok true)
+    )
+)
+
+;; PUBLIC FUNCTIONS - ADMINISTRATIVE
+
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-fee u5000000) err-invalid-parameter) ;; Max 5 STX
+        (var-set platform-fee new-fee)
+        (ok true)
+    )
+)
+
+(define-public (toggle-contract-pause)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set contract-paused (not (var-get contract-paused)))
+        (ok true)
+    )
+)
+
+(define-public (withdraw-platform-fees)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (let ((fees (var-get total-platform-fees)))
+            (var-set total-platform-fees u0)
+            (stx-transfer? fees tx-sender contract-owner)
+        )
+    )
+)
+
+(define-public (deactivate-skill-category (category (string-utf8 32)))
+    (let ((category-info (unwrap! (map-get? skill-categories category) err-invalid-parameter)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set skill-categories category
+                (merge category-info { active: false })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (emergency-revoke-credential (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set credentials credential-id
+                (merge credential { revoked: true })
+            )
+            (ok true)
+        )
+    )
+)
+
+;; PUBLIC FUNCTIONS - CREDENTIAL MINTING
+
+(define-public (mint-credential
+        (holder principal)
+        (skill-name (string-utf8 64))
+        (skill-category (string-utf8 32))
+        (certification-level uint)
+        (validity-duration uint)
+        (metadata-uri (string-utf8 256))
+    )
+    (let (
+            (credential-id (+ (var-get total-credentials) u1))
+            (issuer-info (unwrap! (map-get? authorized-issuers tx-sender) err-not-authorized))
+            (category-info (unwrap! (map-get? skill-categories skill-category)
+                err-invalid-parameter
+            ))
+            (holder-profile (default-to {
+                total-credentials: u0,
+                verified-credentials: u0,
+                skill-points: u0,
+                profile-active: false,
+            }
+                (map-get? holder-profiles holder)
+            ))
+            (skill-points (calculate-skill-points certification-level))
+        )
