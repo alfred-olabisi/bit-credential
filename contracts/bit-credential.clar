@@ -377,3 +377,159 @@
             ))
             (skill-points (calculate-skill-points certification-level))
         )
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (get verified issuer-info) err-not-verified)
+            (asserts! (get active category-info) err-invalid-parameter)
+            (asserts!
+                (and (>= certification-level u1) (<= certification-level u4))
+                err-invalid-parameter
+            )
+            (asserts! (> validity-duration u0) err-invalid-parameter)
+            (asserts! (>= (stx-get-balance holder) (var-get platform-fee))
+                err-insufficient-funds
+            )
+            
+            ;; Collect platform fee from holder
+            (unwrap! (stx-transfer? (var-get platform-fee) holder contract-owner)
+                err-insufficient-funds
+            )
+            
+            ;; Create credential NFT
+            (map-set credentials credential-id {
+                holder: holder,
+                issuer: tx-sender,
+                skill-name: skill-name,
+                skill-category: skill-category,
+                certification-level: certification-level,
+                issue-date: stacks-block-height,
+                expiry-date: (+ stacks-block-height validity-duration),
+                verified: true,
+                metadata-uri: metadata-uri,
+                revoked: false,
+            })
+            
+            ;; Update holder profile
+            (map-set holder-profiles holder {
+                total-credentials: (+ (get total-credentials holder-profile) u1),
+                verified-credentials: (+ (get verified-credentials holder-profile) u1),
+                skill-points: (+ (get skill-points holder-profile) skill-points),
+                profile-active: true,
+            })
+            
+            ;; Update issuer statistics
+            (map-set authorized-issuers tx-sender
+                (merge issuer-info {
+                    credentials-issued: (+ (get credentials-issued issuer-info) u1),
+                    reputation-score: (+ (get reputation-score issuer-info) u1),
+                })
+            )
+            
+            ;; Update skill category statistics
+            (map-set skill-categories skill-category
+                (merge category-info { total-credentials: (+ (get total-credentials category-info) u1) })
+            )
+            
+            ;; Update platform statistics
+            (var-set total-credentials credential-id)
+            (var-set total-platform-fees
+                (+ (var-get total-platform-fees) (var-get platform-fee))
+            )
+            (ok credential-id)
+        )
+    )
+)
+
+;; PUBLIC FUNCTIONS - CREDENTIAL MANAGEMENT
+
+(define-public (verify-credential-authenticity (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (asserts! (not (get verified credential)) err-already-verified)
+            (map-set credentials credential-id
+                (merge credential { verified: true })
+            )
+            
+            ;; Update holder's verified credentials count
+            (let ((holder-profile (unwrap! (map-get? holder-profiles (get holder credential))
+                    err-invalid-parameter
+                )))
+                (map-set holder-profiles (get holder credential)
+                    (merge holder-profile { verified-credentials: (+ (get verified-credentials holder-profile) u1) })
+                )
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (revoke-credential (credential-id uint))
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender (get issuer credential))
+                err-not-authorized
+            )
+            (asserts! (not (get revoked credential)) err-invalid-parameter)
+            (map-set credentials credential-id
+                (merge credential { revoked: true })
+            )
+            
+            ;; Update holder's verified credentials count
+            (let ((holder-profile (unwrap! (map-get? holder-profiles (get holder credential))
+                    err-invalid-parameter
+                )))
+                (map-set holder-profiles (get holder credential)
+                    (merge holder-profile {
+                        verified-credentials: (- (get verified-credentials holder-profile) u1),
+                        skill-points: (- (get skill-points holder-profile)
+                            (calculate-skill-points (get certification-level credential))
+                        ),
+                    })
+                )
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (renew-credential
+        (credential-id uint)
+        (new-validity-duration uint)
+    )
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (is-eq tx-sender (get issuer credential))
+                err-not-authorized
+            )
+            (asserts! (not (get revoked credential)) err-invalid-parameter)
+            (asserts! (> new-validity-duration u0) err-invalid-parameter)
+            (asserts!
+                (>= (stx-get-balance (get holder credential))
+                    (var-get platform-fee)
+                )
+                err-insufficient-funds
+            )
+            
+            ;; Collect renewal fee from holder
+            (unwrap!
+                (stx-transfer? (var-get platform-fee) (get holder credential)
+                    contract-owner
+                )
+                err-insufficient-funds
+            )
+            
+            ;; Update expiry date
+            (map-set credentials credential-id
+                (merge credential { expiry-date: (+ stacks-block-height new-validity-duration) })
+            )
+            
+            ;; Update platform fees
+            (var-set total-platform-fees
+                (+ (var-get total-platform-fees) (var-get platform-fee))
+            )
+            (ok true)
+        )
+    )
+)
