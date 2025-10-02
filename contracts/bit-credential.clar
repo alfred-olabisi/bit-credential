@@ -645,3 +645,104 @@
         )
     )
 )
+
+(define-public (complete-verification-request
+        (verification-id uint)
+        (verification-result bool)
+    )
+    (let ((request (unwrap! (map-get? verification-requests verification-id)
+            err-not-authorized
+        )))
+        (begin
+            (asserts! (is-eq tx-sender (get credential-holder request))
+                err-not-authorized
+            )
+            (asserts! (not (get completed request)) err-invalid-parameter)
+            (map-set verification-requests verification-id
+                (merge request {
+                    completed: true,
+                    verified: verification-result,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (list-credential-for-verification
+        (credential-id uint)
+        (verification-price uint)
+    )
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (is-eq tx-sender (get holder credential))
+                err-not-authorized
+            )
+            (asserts! (not (get revoked credential)) err-invalid-parameter)
+            (asserts! (> (get expiry-date credential) stacks-block-height)
+                err-expired-credential
+            )
+            (asserts! (> verification-price u0) err-invalid-parameter)
+            (map-set credential-listings {
+                credential-id: credential-id,
+                holder: tx-sender,
+            } {
+                verification-price: verification-price,
+                available: true,
+                listed-at: stacks-block-height,
+            })
+            (ok true)
+        )
+    )
+)
+
+(define-public (purchase-verification-access
+        (credential-id uint)
+        (holder principal)
+    )
+    (let (
+            (listing (unwrap!
+                (map-get? credential-listings {
+                    credential-id: credential-id,
+                    holder: holder,
+                })
+                err-not-authorized
+            ))
+            (credential (unwrap! (map-get? credentials credential-id)
+                err-credential-not-found
+            ))
+        )
+        (begin
+            (asserts! (get available listing) err-invalid-parameter)
+            (asserts!
+                (>= (stx-get-balance tx-sender) (get verification-price listing))
+                err-insufficient-funds
+            )
+            
+            ;; Transfer payment to credential holder
+            (unwrap!
+                (stx-transfer? (get verification-price listing) tx-sender holder)
+                err-insufficient-funds
+            )
+            (ok true)
+        )
+    )
+)
+
+;; PUBLIC FUNCTIONS - ANALYTICS
+
+(define-public (update-issuer-analytics (issuer principal))
+    (let ((issuer-info (unwrap! (map-get? authorized-issuers issuer) err-not-authorized)))
+        (begin
+            (asserts! (get verified issuer-info) err-not-verified)
+            (map-set issuer-analytics issuer {
+                monthly-credentials: (get credentials-issued issuer-info),
+                revocation-rate: u0,
+                average-validity-period: u8640,
+                last-updated: stacks-block-height,
+            })
+            (ok true)
+        )
+    )
+)
