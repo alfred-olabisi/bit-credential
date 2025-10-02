@@ -533,3 +533,115 @@
         )
     )
 )
+
+(define-public (transfer-credential
+        (credential-id uint)
+        (new-holder principal)
+    )
+    (let ((credential (unwrap! (map-get? credentials credential-id) err-credential-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender (get holder credential))
+                err-not-authorized
+            )
+            (asserts! (not (get revoked credential)) err-invalid-parameter)
+            (asserts! (> (get expiry-date credential) stacks-block-height)
+                err-expired-credential
+            )
+            
+            ;; Update old holder profile
+            (let ((old-holder-profile (unwrap! (map-get? holder-profiles (get holder credential))
+                    err-invalid-parameter
+                )))
+                (map-set holder-profiles (get holder credential)
+                    (merge old-holder-profile {
+                        total-credentials: (- (get total-credentials old-holder-profile) u1),
+                        verified-credentials: (if (get verified credential)
+                            (- (get verified-credentials old-holder-profile) u1)
+                            (get verified-credentials old-holder-profile)
+                        ),
+                        skill-points: (- (get skill-points old-holder-profile)
+                            (calculate-skill-points (get certification-level credential))
+                        ),
+                    })
+                )
+            )
+            
+            ;; Update new holder profile
+            (let ((new-holder-profile (default-to {
+                    total-credentials: u0,
+                    verified-credentials: u0,
+                    skill-points: u0,
+                    profile-active: false,
+                }
+                    (map-get? holder-profiles new-holder)
+                )))
+                (map-set holder-profiles new-holder {
+                    total-credentials: (+ (get total-credentials new-holder-profile) u1),
+                    verified-credentials: (+ (get verified-credentials new-holder-profile)
+                        (if (get verified credential) u1 u0)
+                    ),
+                    skill-points: (+ (get skill-points new-holder-profile)
+                        (calculate-skill-points (get certification-level credential))
+                    ),
+                    profile-active: true,
+                })
+            )
+            
+            ;; Transfer credential
+            (map-set credentials credential-id
+                (merge credential { holder: new-holder })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (batch-verify-credentials (credential-ids (list 10 uint)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (ok (map verify-single-credential credential-ids))
+    )
+)
+
+;; PUBLIC FUNCTIONS - VERIFICATION MARKETPLACE
+
+(define-public (request-credential-verification
+        (credential-holder principal)
+        (credential-id uint)
+        (verification-fee uint)
+    )
+    (let (
+            (verification-id (+ (var-get verification-counter) u1))
+            (credential (unwrap! (map-get? credentials credential-id)
+                err-credential-not-found
+            ))
+        )
+        (begin
+            (asserts! (not (var-get contract-paused)) err-invalid-parameter)
+            (asserts! (is-eq (get holder credential) credential-holder)
+                err-not-authorized
+            )
+            (asserts! (> verification-fee u0) err-invalid-parameter)
+            (asserts! (>= (stx-get-balance tx-sender) verification-fee)
+                err-insufficient-funds
+            )
+            
+            ;; Transfer verification fee to credential holder
+            (unwrap! (stx-transfer? verification-fee tx-sender credential-holder)
+                err-insufficient-funds
+            )
+            
+            (map-set verification-requests verification-id {
+                requester: tx-sender,
+                credential-holder: credential-holder,
+                credential-id: credential-id,
+                verification-fee: verification-fee,
+                request-timestamp: stacks-block-height,
+                completed: false,
+                verified: false,
+            })
+            (var-set verification-counter verification-id)
+            (ok verification-id)
+        )
+    )
+)
